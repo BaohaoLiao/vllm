@@ -393,7 +393,13 @@ class Qwen2Model(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader(param, loaded_weight)
+                if name == "embed_tokens.weight":
+                    if loaded_weight.shape[0] == 151936:
+                        padding = torch.zeros((128, loaded_weight.shape[1]), dtype=loaded_weight.dtype, device=loaded_weight.device)
+                        loaded_weight = torch.cat([loaded_weight, padding], dim=0)
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
