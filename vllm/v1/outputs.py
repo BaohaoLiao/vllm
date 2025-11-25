@@ -111,6 +111,9 @@ class SamplerOutput:
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
+    # DLLM: Mask state for each token in the block
+    # [num_reqs, block_size] or None if not DLLM
+    dllm_masks: torch.Tensor | None = None
 
 
 @dataclass
@@ -164,6 +167,10 @@ class ModelRunnerOutput:
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
     logprobs: LogprobsLists | None
+
+    # DLLM: Mask state for each generated token
+    # num_reqs x num_generated_tokens or None if not DLLM
+    dllm_masks: list[list[int]] | None = None
 
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]

@@ -118,6 +118,15 @@ class Sampler(nn.Module):
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
 
+        # DLLM: Apply unmasking if any requests use DLLM
+        dllm_masks = None
+        if self._has_dllm_requests(sampling_metadata):
+            sampled, dllm_masks = self._apply_dllm_unmasking(
+                logits=logits,
+                sampled_token_ids=sampled,
+                sampling_metadata=sampling_metadata,
+            )
+
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             # The sampled tokens are expanded to 2D tensor with shape
@@ -125,6 +134,7 @@ class Sampler(nn.Module):
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
+            dllm_masks=dllm_masks,
         )
         return sampler_output
 
@@ -317,3 +327,45 @@ class Sampler(nn.Module):
             sampling_metadata.repetition_penalties,
             output_token_ids,
         )
+
+    @staticmethod
+    def _has_dllm_requests(sampling_metadata: SamplingMetadata) -> bool:
+        """Check if any requests in the batch use DLLM."""
+        # Access requests from sampling_metadata
+        # This may need adjustment based on actual SamplingMetadata structure
+        return False  # TODO: Implement when we know SamplingMetadata structure
+
+    def _apply_dllm_unmasking(
+        self,
+        logits: torch.Tensor,
+        sampled_token_ids: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply DLLM unmasking strategies.
+
+        Args:
+            logits: Model logits [batch_size * block_size, vocab_size]
+            sampled_token_ids: Sampled tokens [batch_size * block_size]
+            sampling_metadata: Sampling metadata with request info
+
+        Returns:
+            Tuple of (updated_token_ids, updated_masks)
+        """
+        from vllm.v1.sample.dllm_constants import DLLMUnmaskingStrategy
+        from vllm.v1.sample.dllm_unmasking import DLLMUnmaskingProcessor
+
+        # TODO: This needs to be implemented based on actual SamplingMetadata structure
+        # For now, this is a placeholder showing the intended logic
+
+        # Extract DLLM requests
+        # requests = sampling_metadata.requests
+        # dllm_requests = [req for req in requests if req.is_dllm]
+
+        # if not dllm_requests:
+        #     return sampled_token_ids, None
+
+        # For each DLLM request, apply unmasking
+        # ...
+
+        # Placeholder return
+        return sampled_token_ids, None
