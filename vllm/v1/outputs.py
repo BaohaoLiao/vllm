@@ -168,10 +168,6 @@ class ModelRunnerOutput:
     # [num_reqs]
     logprobs: LogprobsLists | None
 
-    # DLLM: Mask state for each generated token
-    # num_reqs x num_generated_tokens or None if not DLLM
-    dllm_masks: list[list[int]] | None = None
-
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len, num_prompt_logprobs]
@@ -180,6 +176,10 @@ class ModelRunnerOutput:
 
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None]
+
+    # DLLM: Mask state for each generated token
+    # num_reqs x num_generated_tokens or None if not DLLM
+    dllm_masks: list[list[int]] | None = None
 
     kv_connector_output: KVConnectorOutput | None = None
 
