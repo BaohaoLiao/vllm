@@ -36,6 +36,8 @@ class CompletionOutput:
             to stop, None if the completion finished for some other reason
             including encountering the EOS token.
         lora_request: The LoRA request that was used to generate the output.
+        dllm_decoding_order: For DLLM requests, the iteration number when each
+            token was unmasked (0-indexed). None for non-DLLM requests.
     """
 
     index: int
@@ -46,6 +48,7 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    dllm_decoding_order: list[int] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -58,7 +61,8 @@ class CompletionOutput:
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
-            f"stop_reason={self.stop_reason})"
+            f"stop_reason={self.stop_reason}, "
+            f"dllm_decoding_order={self.dllm_decoding_order})"
         )
 
 
@@ -161,6 +165,12 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)
+                        if next_completion.dllm_decoding_order:
+                            if completion.dllm_decoding_order is None:
+                                completion.dllm_decoding_order = []
+                            completion.dllm_decoding_order.extend(
+                                next_completion.dllm_decoding_order
+                            )
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )

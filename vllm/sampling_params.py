@@ -254,6 +254,10 @@ class SamplingParams(
     """Confidence threshold for dynamic unmasking strategy."""
     dllm_mask_token_id: int | None = None
     """Token ID to use for masked positions. If None, uses pad_token_id."""
+    dllm_return_decoding_order: bool = False
+    """Whether to return the decoding order (iteration when each token was
+    unmasked) in the output. Similar to logprobs, this adds extra information
+    to the response showing which denoising iteration finalized each token."""
 
     @staticmethod
     def from_optional(
