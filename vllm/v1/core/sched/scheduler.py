@@ -991,6 +991,7 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
+        dllm_decoding_orders = model_runner_output.dllm_decoding_order
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
@@ -1031,6 +1032,11 @@ class Scheduler(SchedulerInterface):
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
+            )
+            req_dllm_decoding_order = (
+                dllm_decoding_orders[req_index]
+                if dllm_decoding_orders is not None
+                else None
             )
 
             scheduled_spec_token_ids = (
@@ -1119,6 +1125,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        dllm_decoding_order=req_dllm_decoding_order,
                     )
                 )
             else:
