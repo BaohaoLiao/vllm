@@ -155,6 +155,9 @@ class Request:
             self._num_valid_tokens = 0
             # Current denoising iteration within the block
             self._dllm_iteration = 0
+            # Decoding order: iteration when each token was unmasked
+            # -1 = not yet unmasked, 0+ = iteration number
+            self._dllm_decoding_order: list[int] = []
         else:
             self.dllm_block_size = 0
             self.dllm_denoising_steps = 0
@@ -164,6 +167,7 @@ class Request:
             self._dllm_mask = []
             self._num_valid_tokens = 0
             self._dllm_iteration = 0
+            self._dllm_decoding_order = []
 
     @classmethod
     def from_engine_core_request(
@@ -268,12 +272,31 @@ class Request:
             return
         from vllm.v1.sample.dllm_constants import DLLMMaskState
 
+        # Track which tokens became unmasked in this iteration
+        old_mask = self._dllm_mask.copy() if self._dllm_mask else []
+
         # Update mask
         self._dllm_mask = new_mask.copy()
 
+        # Ensure decoding_order has same length as mask
+        while len(self._dllm_decoding_order) < len(new_mask):
+            self._dllm_decoding_order.append(-1)
+
+        # Update decoding order for newly unmasked tokens
+        block_start = max(0, len(self._dllm_mask) - self.dllm_block_size)
+        for i in range(block_start, len(new_mask)):
+            # Check if token became unmasked in this iteration
+            old_state = old_mask[i] if i < len(old_mask) else DLLMMaskState.MASKED
+            new_state = new_mask[i]
+
+            if (old_state == DLLMMaskState.MASKED and
+                new_state == DLLMMaskState.UNMASKED and
+                self._dllm_decoding_order[i] == -1):
+                # Token was just unmasked, record the iteration
+                self._dllm_decoding_order[i] = self._dllm_iteration
+
         # Update num_valid_tokens
         # Count unmasked tokens in current block
-        block_start = len(self._dllm_mask) - self.dllm_block_size
         block_mask = self._dllm_mask[block_start:]
         num_unmasked = sum(
             1 for m in block_mask if m == DLLMMaskState.UNMASKED
@@ -334,6 +357,14 @@ class Request:
             new_mask[0] = DLLMMaskState.UNMASKED
 
         self._dllm_mask.extend(new_mask)
+
+        # Initialize decoding order for new block
+        # If first token is unmasked, mark it as iteration 0
+        new_order = [-1] * self.dllm_block_size
+        if num_tokens > 0:
+            new_order[0] = 0
+        self._dllm_decoding_order.extend(new_order)
+
         self._dllm_iteration = 0
 
     @property
@@ -345,6 +376,12 @@ class Request:
     def dllm_current_iteration(self) -> int:
         """Get current denoising iteration."""
         return self._dllm_iteration if self.is_dllm else 0
+
+    def dllm_get_decoding_order(self) -> list[int]:
+        """Get the decoding order for all tokens."""
+        if not self.is_dllm:
+            return []
+        return self._dllm_decoding_order.copy()
 
 
 class RequestStatus(enum.IntEnum):

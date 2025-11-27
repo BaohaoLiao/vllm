@@ -77,7 +77,7 @@ def update_dllm_from_output(
     request: "Request",
     generated_token_ids: list[int],
     dllm_mask: list[int] | None,
-) -> tuple[list[int], bool]:
+) -> tuple[list[int], bool, list[int]]:
     """Update DLLM request from model output.
 
     Args:
@@ -86,12 +86,13 @@ def update_dllm_from_output(
         dllm_mask: Updated mask state from unmasking processor
 
     Returns:
-        Tuple of (tokens_to_append, is_stopped)
+        Tuple of (tokens_to_append, is_stopped, decoding_order)
         - tokens_to_append: Only unmasked tokens that should be added to output
         - is_stopped: Whether generation should stop
+        - decoding_order: Iteration number when each token was unmasked
     """
     if not request.is_dllm:
-        return generated_token_ids, False
+        return generated_token_ids, False, []
 
     from vllm.v1.sample.dllm_constants import DLLMMaskState
 
@@ -101,19 +102,23 @@ def update_dllm_from_output(
 
     # Only append tokens that are unmasked
     tokens_to_append = []
+    decoding_order_to_append = []
     current_mask = request.dllm_get_mask()
+    current_decoding_order = request.dllm_get_decoding_order()
 
     # Get the last block_size tokens from mask (current block)
     block_size = request.dllm_block_size
     if len(current_mask) >= block_size:
         block_mask = current_mask[-block_size:]
+        block_order = current_decoding_order[-block_size:] if len(current_decoding_order) >= block_size else [-1] * block_size
 
         # Check which tokens in the generated block are unmasked
-        for i, (token, mask_state) in enumerate(
-            zip(generated_token_ids[:block_size], block_mask)
+        for i, (token, mask_state, order) in enumerate(
+            zip(generated_token_ids[:block_size], block_mask, block_order)
         ):
             if mask_state == DLLMMaskState.UNMASKED:
                 tokens_to_append.append(token)
+                decoding_order_to_append.append(order)
 
     # Check if we should stop
     is_stopped = False
@@ -127,7 +132,7 @@ def update_dllm_from_output(
         ):
             is_stopped = True
 
-    return tokens_to_append, is_stopped
+    return tokens_to_append, is_stopped, decoding_order_to_append
 
 
 def check_dllm_ready_for_next_block(request: "Request") -> bool:
