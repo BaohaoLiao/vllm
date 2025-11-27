@@ -991,7 +991,6 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
-        dllm_decoding_orders = model_runner_output.dllm_decoding_order
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
@@ -1033,11 +1032,14 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
-            req_dllm_decoding_order = (
-                dllm_decoding_orders[req_index]
-                if dllm_decoding_orders is not None
-                else None
-            )
+            # Extract DLLM decoding order from the request (if DLLM and flag enabled)
+            req_dllm_decoding_order = None
+            if request.is_dllm and request.sampling_params.dllm_return_decoding_order:
+                # Get the decoding order for tokens generated in this step
+                full_order = request.dllm_get_decoding_order()
+                if full_order and len(generated_token_ids) > 0:
+                    # Return only the decoding order for newly generated tokens
+                    req_dllm_decoding_order = full_order[-len(generated_token_ids):]
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)

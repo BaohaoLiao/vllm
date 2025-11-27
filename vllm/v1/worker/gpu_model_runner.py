@@ -3124,6 +3124,14 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            # Extract DLLM decoding order if present
+            dllm_decoding_order_lists = None
+            if sampler_output.dllm_decoding_order is not None:
+                # Convert tensor to list of lists
+                dllm_decoding_order_lists = [
+                    row.tolist() for row in sampler_output.dllm_decoding_order
+                ]
+
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -3136,6 +3144,7 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                dllm_decoding_order=dllm_decoding_order_lists,
             )
 
         if not self.use_async_scheduling:
