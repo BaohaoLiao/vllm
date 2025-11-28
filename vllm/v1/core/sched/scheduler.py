@@ -240,7 +240,13 @@ class Scheduler(SchedulerInterface):
                     get_dllm_num_new_tokens,
                 )
 
-                if should_continue_refining_block(request):
+                # Check if first block needs initialization
+                if not hasattr(request, '_dllm_mask') or len(request._dllm_mask) == 0:
+                    # Initialize first block
+                    num_new_tokens = request.dllm_block_size
+                    new_block_tokens = [request.dllm_mask_token_id] * num_new_tokens
+                    request.dllm_init_new_block(new_block_tokens)
+                elif should_continue_refining_block(request):
                     # Refining current block - no new KV slots needed
                     num_new_tokens = 0
                 else:
@@ -298,23 +304,28 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
-                req_index += 1
-                continue
+                # DLLM exception: Allow DLLM requests with 0 new tokens (refinement mode)
+                if not request.is_dllm:
+                    req_index += 1
+                    continue
+                # DLLM refinement - proceed to schedule with existing KV cache
 
             # Schedule newly needed KV blocks for the request.
-            with record_function_or_nullcontext("schedule: allocate_slots"):
-                while True:
-                    new_blocks = self.kv_cache_manager.allocate_slots(
-                        request,
-                        num_new_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens,
-                    )
+            # DLLM: Skip allocation if refining (num_new_tokens = 0)
+            if num_new_tokens > 0:
+                with record_function_or_nullcontext("schedule: allocate_slots"):
+                    while True:
+                        new_blocks = self.kv_cache_manager.allocate_slots(
+                            request,
+                            num_new_tokens,
+                            num_lookahead_tokens=self.num_lookahead_tokens,
+                        )
 
-                    if new_blocks is not None:
-                        # The request can be scheduled.
-                        break
+                        if new_blocks is not None:
+                            # The request can be scheduled.
+                            break
 
-                    # The request cannot be scheduled.
+                        # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
@@ -362,6 +373,9 @@ class Scheduler(SchedulerInterface):
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
                         break
+            else:
+                # DLLM refinement: No new blocks needed, use existing KV cache
+                new_blocks = []
 
             if new_blocks is None:
                 # Cannot schedule this request.
