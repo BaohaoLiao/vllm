@@ -375,7 +375,7 @@ class Scheduler(SchedulerInterface):
                         break
             else:
                 # DLLM refinement: No new blocks needed, use existing KV cache
-                new_blocks = []
+                new_blocks = self.kv_cache_manager.empty_kv_cache_blocks
 
             if new_blocks is None:
                 # Cannot schedule this request.
