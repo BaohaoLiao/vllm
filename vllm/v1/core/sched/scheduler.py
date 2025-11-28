@@ -1056,7 +1056,8 @@ class Scheduler(SchedulerInterface):
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
-            assert num_tokens_scheduled > 0
+            # DLLM: Allow 0 tokens for DLLM refinement (request object checked below)
+            # assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # Skip requests that were recovered from KV load failure
                 continue
