@@ -42,3 +42,6 @@ class SamplingMetadata:
 
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+
+    # DLLM: request index -> Request object for DLLM requests in batch
+    dllm_requests: dict[int, "Request"] | None = None  # type: ignore

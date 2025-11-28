@@ -155,6 +155,7 @@ from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.dllm_generator import DLLMGenerator
 
 from .utils import (
     AttentionGroup,
@@ -343,6 +344,10 @@ class GPUModelRunner(
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
+
+        # DLLM Generator for block-based generation
+        from vllm.v1.worker.dllm_generator import DLLMGenerator
+        self.dllm_generator = DLLMGenerator()
 
         self.eplb_state: EplbState | None = None
         """
@@ -598,6 +603,9 @@ class GPUModelRunner(
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
+
+        # DLLM
+        self.dllm_generator = DLLMGenerator()
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:

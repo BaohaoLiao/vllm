@@ -233,6 +233,31 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
+            # DLLM: Handle block-based scheduling for DLLM requests
+            if request.is_dllm:
+                from vllm.v1.core.sched.dllm_helper import (
+                    should_continue_refining_block,
+                    get_dllm_num_new_tokens,
+                )
+
+                if should_continue_refining_block(request):
+                    # Refining current block - no new KV slots needed
+                    num_new_tokens = 0
+                else:
+                    # Check if finished generation
+                    if request.dllm_num_valid_tokens >= request.max_tokens:
+                        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                        req_index += 1
+                        continue
+
+                    # Advance to next block
+                    request.dllm_advance_to_next_block()
+                    num_new_tokens = request.dllm_block_size
+
+                    # Initialize new block with mask tokens
+                    new_block_tokens = [request.dllm_mask_token_id] * num_new_tokens
+                    request.dllm_init_new_block(new_block_tokens)
+
             # Make sure the input position does not exceed the max model len or
             # request's max_tokens.
             # This is necessary when using spec decoding and/or async scheduling.
@@ -1071,8 +1096,31 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             status_before_stop = request.status
 
-            # Check for stop and update request status.
-            if new_token_ids:
+            # DLLM: Process block-based generation
+            if request.is_dllm and new_token_ids:
+                from vllm.v1.core.sched.dllm_helper import update_dllm_from_output
+
+                # Get DLLM masks from model output (if available)
+                dllm_masks = None
+                if model_runner_output.dllm_masks and req_idx < len(model_runner_output.dllm_masks):
+                    dllm_masks = model_runner_output.dllm_masks[req_idx]
+
+                # Apply DLLM unmasking and update mask state
+                # This also populates the decoding order!
+                new_token_ids, stopped, _ = update_dllm_from_output(
+                    request,
+                    new_token_ids,
+                    dllm_masks,
+                )
+
+                # Append only unmasked tokens
+                if new_token_ids:
+                    for token_id in new_token_ids:
+                        request.append_output_token_ids(token_id)
+                    # Check if should stop
+                    stopped = stopped or check_stop(request, self.max_model_len)
+            elif new_token_ids:
+                # Standard AR: Check for stop and update request status
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )

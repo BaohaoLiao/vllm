@@ -331,41 +331,90 @@ class Sampler(nn.Module):
     @staticmethod
     def _has_dllm_requests(sampling_metadata: SamplingMetadata) -> bool:
         """Check if any requests in the batch use DLLM."""
-        # Access requests from sampling_metadata
-        # This may need adjustment based on actual SamplingMetadata structure
-        return False  # TODO: Implement when we know SamplingMetadata structure
+        # Check if any requests have DLLM enabled
+        # For now, we'll check if we have access to request info
+        # This will be populated when scheduler integration is complete
+        return hasattr(sampling_metadata, 'dllm_requests') and bool(sampling_metadata.dllm_requests)
 
     def _apply_dllm_unmasking(
         self,
         logits: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Apply DLLM unmasking strategies.
 
         Args:
-            logits: Model logits [batch_size * block_size, vocab_size]
-            sampled_token_ids: Sampled tokens [batch_size * block_size]
+            logits: Model logits [num_tokens, vocab_size]
+            sampled_token_ids: Sampled tokens [num_tokens]
             sampling_metadata: Sampling metadata with request info
 
         Returns:
             Tuple of (updated_token_ids, updated_masks)
+            - updated_token_ids: Token IDs (potentially modified)
+            - updated_masks: Mask state tensor [num_requests, block_size] or None
         """
-        from vllm.v1.sample.dllm_constants import DLLMUnmaskingStrategy
         from vllm.v1.sample.dllm_unmasking import DLLMUnmaskingProcessor
+        from vllm.v1.sample.dllm_constants import DLLMUnmaskingStrategy
 
-        # TODO: This needs to be implemented based on actual SamplingMetadata structure
-        # For now, this is a placeholder showing the intended logic
+        # Get DLLM requests from metadata
+        dllm_requests = sampling_metadata.dllm_requests
+        if not dllm_requests:
+            return sampled_token_ids, None
 
-        # Extract DLLM requests
-        # requests = sampling_metadata.requests
-        # dllm_requests = [req for req in requests if req.is_dllm]
+        # Process each DLLM request
+        dllm_masks_list = []
 
-        # if not dllm_requests:
-        #     return sampled_token_ids, None
+        for req_idx, request in dllm_requests.items():
+            # Get current mask state
+            current_mask = torch.tensor(
+                request.dllm_get_mask(),
+                device=logits.device,
+                dtype=torch.long
+            )
 
-        # For each DLLM request, apply unmasking
-        # ...
+            # Get input context (output tokens generated so far)
+            input_ids = torch.tensor(
+                sampling_metadata.output_token_ids[req_idx],
+                device=logits.device,
+                dtype=torch.long
+            )
 
-        # Placeholder return
+            # Create unmasking processor
+            processor = DLLMUnmaskingProcessor(
+                block_size=request.dllm_block_size,
+                denoising_steps=request.dllm_denoising_steps,
+                confidence_threshold=request.dllm_confidence_threshold,
+            )
+
+            # Apply unmasking
+            strategy = DLLMUnmaskingStrategy.from_str(
+                request.dllm_unmasking_strategy
+            )
+            updated_mask, updated_tokens = processor(
+                logits=logits[req_idx],
+                input_ids=input_ids,
+                token_ids=sampled_token_ids[req_idx],
+                dllm_mask=current_mask,
+                strategy=strategy,
+            )
+
+            # Update request state (this also updates decoding order!)
+            request.dllm_update_mask(updated_mask.tolist())
+
+            # Replace sampled tokens
+            sampled_token_ids[req_idx] = updated_tokens
+
+            # Collect masks for output
+            dllm_masks_list.append(updated_mask.tolist())
+
+        # Build output tensor (if we had DLLM requests)
+        if dllm_masks_list:
+            dllm_masks = torch.tensor(
+                dllm_masks_list,
+                device=logits.device,
+                dtype=torch.long
+            )
+            return sampled_token_ids, dllm_masks
+
         return sampled_token_ids, None
