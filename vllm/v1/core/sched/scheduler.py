@@ -234,6 +234,7 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # DLLM: Handle block-based scheduling for DLLM requests
+            dllm_is_refining = False
             if request.is_dllm:
                 from vllm.v1.core.sched.dllm_helper import (
                     should_continue_refining_block,
@@ -247,8 +248,9 @@ class Scheduler(SchedulerInterface):
                     new_block_tokens = [request.dllm_mask_token_id] * num_new_tokens
                     request.dllm_init_new_block(new_block_tokens)
                 elif should_continue_refining_block(request):
-                    # Refining current block - no new KV slots needed
-                    num_new_tokens = 0
+                    # Refining current block - process block_size tokens but don't allocate new KV slots
+                    num_new_tokens = request.dllm_block_size
+                    dllm_is_refining = True
                 else:
                     # Check if finished generation
                     if request.dllm_num_valid_tokens >= request.max_tokens:
@@ -304,15 +306,12 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
-                # DLLM exception: Allow DLLM requests with 0 new tokens (refinement mode)
-                if not request.is_dllm:
-                    req_index += 1
-                    continue
-                # DLLM refinement - proceed to schedule with existing KV cache
+                req_index += 1
+                continue
 
             # Schedule newly needed KV blocks for the request.
-            # DLLM: Skip allocation if refining (num_new_tokens = 0)
-            if num_new_tokens > 0:
+            # DLLM: Skip allocation if refining (reuse existing KV cache)
+            if not dllm_is_refining:
                 with record_function_or_nullcontext("schedule: allocate_slots"):
                     while True:
                         new_blocks = self.kv_cache_manager.allocate_slots(
