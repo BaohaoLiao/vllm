@@ -233,6 +233,39 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
+            # DLLM: Handle block-based scheduling for DLLM requests
+            dllm_is_refining = False
+            if request.is_dllm:
+                from vllm.v1.core.sched.dllm_helper import (
+                    should_continue_refining_block,
+                    get_dllm_num_new_tokens,
+                )
+
+                # Check if first block needs initialization
+                if not hasattr(request, '_dllm_mask') or len(request._dllm_mask) == 0:
+                    # Initialize first block
+                    num_new_tokens = request.dllm_block_size
+                    new_block_tokens = [request.dllm_mask_token_id] * num_new_tokens
+                    request.dllm_init_new_block(new_block_tokens)
+                elif should_continue_refining_block(request):
+                    # Refining current block - process block_size tokens but don't allocate new KV slots
+                    num_new_tokens = request.dllm_block_size
+                    dllm_is_refining = True
+                else:
+                    # Check if finished generation
+                    if request.dllm_num_valid_tokens >= request.max_tokens:
+                        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                        req_index += 1
+                        continue
+
+                    # Advance to next block
+                    request.dllm_advance_to_next_block()
+                    num_new_tokens = request.dllm_block_size
+
+                    # Initialize new block with mask tokens
+                    new_block_tokens = [request.dllm_mask_token_id] * num_new_tokens
+                    request.dllm_init_new_block(new_block_tokens)
+
             # Make sure the input position does not exceed the max model len or
             # request's max_tokens.
             # This is necessary when using spec decoding and/or async scheduling.
@@ -277,19 +310,21 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Schedule newly needed KV blocks for the request.
-            with record_function_or_nullcontext("schedule: allocate_slots"):
-                while True:
-                    new_blocks = self.kv_cache_manager.allocate_slots(
-                        request,
-                        num_new_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens,
-                    )
+            # DLLM: Skip allocation if refining (reuse existing KV cache)
+            if not dllm_is_refining:
+                with record_function_or_nullcontext("schedule: allocate_slots"):
+                    while True:
+                        new_blocks = self.kv_cache_manager.allocate_slots(
+                            request,
+                            num_new_tokens,
+                            num_lookahead_tokens=self.num_lookahead_tokens,
+                        )
 
-                    if new_blocks is not None:
-                        # The request can be scheduled.
-                        break
+                        if new_blocks is not None:
+                            # The request can be scheduled.
+                            break
 
-                    # The request cannot be scheduled.
+                        # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
@@ -337,6 +372,9 @@ class Scheduler(SchedulerInterface):
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
                         break
+            else:
+                # DLLM refinement: No new blocks needed, use existing KV cache
+                new_blocks = self.kv_cache_manager.empty_kv_cache_blocks
 
             if new_blocks is None:
                 # Cannot schedule this request.
@@ -1017,7 +1055,8 @@ class Scheduler(SchedulerInterface):
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
-            assert num_tokens_scheduled > 0
+            # DLLM: Allow 0 tokens for DLLM refinement (request object checked below)
+            # assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # Skip requests that were recovered from KV load failure
                 continue
@@ -1032,6 +1071,14 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
+            # Extract DLLM decoding order from the request (if DLLM and flag enabled)
+            req_dllm_decoding_order = None
+            if request.is_dllm and request.sampling_params.dllm_return_decoding_order:
+                # Get the decoding order for tokens generated in this step
+                full_order = request.dllm_get_decoding_order()
+                if full_order and len(generated_token_ids) > 0:
+                    # Return only the decoding order for newly generated tokens
+                    req_dllm_decoding_order = full_order[-len(generated_token_ids):]
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
@@ -1063,8 +1110,31 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             status_before_stop = request.status
 
-            # Check for stop and update request status.
-            if new_token_ids:
+            # DLLM: Process block-based generation
+            if request.is_dllm and new_token_ids:
+                from vllm.v1.core.sched.dllm_helper import update_dllm_from_output
+
+                # Get DLLM masks from model output (if available)
+                dllm_masks = None
+                if model_runner_output.dllm_masks and req_idx < len(model_runner_output.dllm_masks):
+                    dllm_masks = model_runner_output.dllm_masks[req_idx]
+
+                # Apply DLLM unmasking and update mask state
+                # This also populates the decoding order!
+                new_token_ids, stopped, _ = update_dllm_from_output(
+                    request,
+                    new_token_ids,
+                    dllm_masks,
+                )
+
+                # Append only unmasked tokens
+                if new_token_ids:
+                    for token_id in new_token_ids:
+                        request.append_output_token_ids(token_id)
+                    # Check if should stop
+                    stopped = stopped or check_stop(request, self.max_model_len)
+            elif new_token_ids:
+                # Standard AR: Check for stop and update request status
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
@@ -1119,6 +1189,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        dllm_decoding_order=req_dllm_decoding_order,
                     )
                 )
             else:

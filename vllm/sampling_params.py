@@ -240,6 +240,25 @@ class SamplingParams(
 
     skip_reading_prefix_cache: bool | None = None
 
+    # DLLM (Diffusion Language Model) parameters
+    dllm_enabled: bool = False
+    """Whether to enable DLLM (Diffusion Language Model) generation mode."""
+    dllm_block_size: int = 4
+    """Block size for DLLM generation. Tokens are generated in blocks."""
+    dllm_denoising_steps: int | None = None
+    """Number of denoising iterations per block. Defaults to block_size."""
+    dllm_unmasking_strategy: str = "low_confidence_dynamic"
+    """Strategy for unmasking tokens during DLLM generation.
+    Options: 'sequential', 'low_confidence_dynamic', 'low_confidence_static'."""
+    dllm_confidence_threshold: float = 0.85
+    """Confidence threshold for dynamic unmasking strategy."""
+    dllm_mask_token_id: int | None = None
+    """Token ID to use for masked positions. If None, uses pad_token_id."""
+    dllm_return_decoding_order: bool = False
+    """Whether to return the decoding order (iteration when each token was
+    unmasked) in the output. Similar to logprobs, this adds extra information
+    to the response showing which denoising iteration finalized each token."""
+
     @staticmethod
     def from_optional(
         n: int | None = 1,

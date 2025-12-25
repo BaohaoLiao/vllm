@@ -132,6 +132,43 @@ class Request:
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
+        # DLLM-specific fields
+        self.is_dllm = (
+            sampling_params is not None and sampling_params.dllm_enabled
+        )
+        if self.is_dllm:
+            from vllm.v1.sample.dllm_constants import DLLMMaskState
+
+            self.dllm_block_size = sampling_params.dllm_block_size
+            self.dllm_denoising_steps = (
+                sampling_params.dllm_denoising_steps
+                if sampling_params.dllm_denoising_steps is not None
+                else self.dllm_block_size
+            )
+            self.dllm_unmasking_strategy = sampling_params.dllm_unmasking_strategy
+            self.dllm_confidence_threshold = sampling_params.dllm_confidence_threshold
+            self.dllm_mask_token_id = sampling_params.dllm_mask_token_id
+
+            # Track mask state for each token (MASKED/UNMASKED/CACHED)
+            self._dllm_mask: list[int] = []
+            # Number of tokens that are unmasked (confirmed)
+            self._num_valid_tokens = 0
+            # Current denoising iteration within the block
+            self._dllm_iteration = 0
+            # Decoding order: iteration when each token was unmasked
+            # -1 = not yet unmasked, 0+ = iteration number
+            self._dllm_decoding_order: list[int] = []
+        else:
+            self.dllm_block_size = 0
+            self.dllm_denoising_steps = 0
+            self.dllm_unmasking_strategy = ""
+            self.dllm_confidence_threshold = 0.0
+            self.dllm_mask_token_id = None
+            self._dllm_mask = []
+            self._num_valid_tokens = 0
+            self._dllm_iteration = 0
+            self._dllm_decoding_order = []
+
     @classmethod
     def from_engine_core_request(
         cls,
@@ -221,6 +258,130 @@ class Request:
             return None
         events, self.events = self.events, []
         return events
+
+    # DLLM-specific methods
+    def dllm_get_mask(self) -> list[int]:
+        """Get the current DLLM mask for output tokens."""
+        if not self.is_dllm:
+            return []
+        return self._dllm_mask.copy()
+
+    def dllm_update_mask(self, new_mask: list[int]) -> None:
+        """Update the DLLM mask for the current block."""
+        if not self.is_dllm:
+            return
+        from vllm.v1.sample.dllm_constants import DLLMMaskState
+
+        # Track which tokens became unmasked in this iteration
+        old_mask = self._dllm_mask.copy() if self._dllm_mask else []
+
+        # Update mask
+        self._dllm_mask = new_mask.copy()
+
+        # Ensure decoding_order has same length as mask
+        while len(self._dllm_decoding_order) < len(new_mask):
+            self._dllm_decoding_order.append(-1)
+
+        # Update decoding order for newly unmasked tokens
+        block_start = max(0, len(self._dllm_mask) - self.dllm_block_size)
+        for i in range(block_start, len(new_mask)):
+            # Check if token became unmasked in this iteration
+            old_state = old_mask[i] if i < len(old_mask) else DLLMMaskState.MASKED
+            new_state = new_mask[i]
+
+            if (old_state == DLLMMaskState.MASKED and
+                new_state == DLLMMaskState.UNMASKED and
+                self._dllm_decoding_order[i] == -1):
+                # Token was just unmasked, record the iteration
+                self._dllm_decoding_order[i] = self._dllm_iteration
+
+        # Update num_valid_tokens
+        # Count unmasked tokens in current block
+        block_mask = self._dllm_mask[block_start:]
+        num_unmasked = sum(
+            1 for m in block_mask if m == DLLMMaskState.UNMASKED
+        )
+
+        # Update iteration counter
+        self._dllm_iteration += 1
+
+    def dllm_is_current_block_complete(self) -> bool:
+        """Check if the current block is fully unmasked."""
+        if not self.is_dllm or not self._dllm_mask:
+            return False
+        from vllm.v1.sample.dllm_constants import DLLMMaskState
+
+        # Check last block
+        block_start = max(0, len(self._dllm_mask) - self.dllm_block_size)
+        block_mask = self._dllm_mask[block_start:]
+
+        # Block is complete if all tokens are unmasked
+        return all(m == DLLMMaskState.UNMASKED for m in block_mask)
+
+    def dllm_advance_to_next_block(self) -> None:
+        """Mark current block as cached and prepare for next block."""
+        if not self.is_dllm:
+            return
+        from vllm.v1.sample.dllm_constants import DLLMMaskState
+
+        # Mark current block as cached
+        block_start = max(0, len(self._dllm_mask) - self.dllm_block_size)
+        for i in range(block_start, len(self._dllm_mask)):
+            self._dllm_mask[i] = DLLMMaskState.CACHED
+
+        # Update valid tokens
+        self._num_valid_tokens += self.dllm_block_size
+
+        # Reset iteration counter
+        self._dllm_iteration = 0
+
+    def dllm_init_new_block(self, token_ids: list[int]) -> None:
+        """Initialize a new masked block."""
+        if not self.is_dllm:
+            return
+        from vllm.v1.sample.dllm_constants import DLLMMaskState
+
+        # Pad to block size if needed
+        num_tokens = len(token_ids)
+        if num_tokens < self.dllm_block_size:
+            # Pad with masked tokens
+            padding = [self.dllm_mask_token_id] * (
+                self.dllm_block_size - num_tokens
+            )
+            token_ids.extend(padding)
+
+        # Initialize all tokens as masked except possibly the first
+        new_mask = [DLLMMaskState.MASKED] * self.dllm_block_size
+        # First token can be unmasked for sequential generation
+        if num_tokens > 0:
+            new_mask[0] = DLLMMaskState.UNMASKED
+
+        self._dllm_mask.extend(new_mask)
+
+        # Initialize decoding order for new block
+        # If first token is unmasked, mark it as iteration 0
+        new_order = [-1] * self.dllm_block_size
+        if num_tokens > 0:
+            new_order[0] = 0
+        self._dllm_decoding_order.extend(new_order)
+
+        self._dllm_iteration = 0
+
+    @property
+    def dllm_num_valid_tokens(self) -> int:
+        """Get number of valid (unmasked) tokens."""
+        return self._num_valid_tokens if self.is_dllm else self.num_output_tokens
+
+    @property
+    def dllm_current_iteration(self) -> int:
+        """Get current denoising iteration."""
+        return self._dllm_iteration if self.is_dllm else 0
+
+    def dllm_get_decoding_order(self) -> list[int]:
+        """Get the decoding order for all tokens."""
+        if not self.is_dllm:
+            return []
+        return self._dllm_decoding_order.copy()
 
 
 class RequestStatus(enum.IntEnum):

@@ -108,6 +108,7 @@ class RequestState:
         top_p: float | None = None,
         n: int | None = None,
         temperature: float | None = None,
+        dllm_return_decoding_order: bool = False,
     ):
         self.request_id = request_id
         self.parent_req = parent_req
@@ -129,6 +130,8 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        self.dllm_return_decoding_order = dllm_return_decoding_order
+        self.dllm_decoding_order: list[int] = []  # Accumulated decoding order
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -164,6 +167,7 @@ class RequestState:
             top_p = sampling_params.top_p
             n = sampling_params.n
             temperature = sampling_params.temperature
+            dllm_return_decoding_order = sampling_params.dllm_return_decoding_order
         else:
             logprobs_processor = None
             detokenizer = None
@@ -171,6 +175,7 @@ class RequestState:
             top_p = None
             n = None
             temperature = None
+            dllm_return_decoding_order = False
             assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
 
@@ -195,6 +200,7 @@ class RequestState:
             queue=queue,
             log_stats=log_stats,
             stream_interval=stream_interval,
+            dllm_return_decoding_order=dllm_return_decoding_order,
         )
 
     def make_request_output(
@@ -204,6 +210,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
+        dllm_decoding_order: list[int] | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -241,7 +248,14 @@ class RequestState:
                 request_id, [self._new_pooling_output(pooling_output)], finished
             )
 
-        output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
+        # Get decoding order if flag is set
+        output_dllm_decoding_order = None
+        if self.dllm_return_decoding_order and self.dllm_decoding_order:
+            output_dllm_decoding_order = self.dllm_decoding_order.copy()
+
+        output = self._new_completion_output(
+            new_token_ids, finish_reason, stop_reason, output_dllm_decoding_order
+        )
 
         if self.parent_req is None:
             outputs = [output]
@@ -304,6 +318,7 @@ class RequestState:
         token_ids: list[int],
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
+        dllm_decoding_order: list[int] | None = None,
     ) -> CompletionOutput:
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
@@ -320,6 +335,10 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
 
+        # Prepare DLLM decoding order, based on delta mode
+        if dllm_decoding_order is not None and delta:
+            dllm_decoding_order = dllm_decoding_order[-len(token_ids) :]
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
@@ -328,6 +347,7 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            dllm_decoding_order=dllm_decoding_order,
         )
 
     def _new_pooling_output(
@@ -485,6 +505,12 @@ class OutputProcessor:
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
 
+            # Accumulate DLLM decoding order if present
+            if engine_core_output.dllm_decoding_order is not None:
+                req_state.dllm_decoding_order.extend(
+                    engine_core_output.dllm_decoding_order
+                )
+
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
@@ -507,6 +533,7 @@ class OutputProcessor:
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,
+                req_state.dllm_decoding_order if req_state.dllm_decoding_order else None,
             ):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().

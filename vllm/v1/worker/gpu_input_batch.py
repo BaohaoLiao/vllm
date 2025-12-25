@@ -811,6 +811,19 @@ class InputBatch:
             )
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
+        # DLLM: Collect DLLM requests for unmasking in sampler
+        dllm_requests: dict[int, "Request"] | None = None  # type: ignore
+        if hasattr(self, 'req_state_map'):
+            dllm_req_dict = {}
+            for i, req_id in enumerate(self._req_ids[:num_reqs]):
+                if req_id in self.req_state_map:
+                    req_state = self.req_state_map[req_id]
+                    # Access Request object from CachedRequestState
+                    if hasattr(req_state, 'request') and req_state.request.is_dllm:
+                        dllm_req_dict[i] = req_state.request
+            if dllm_req_dict:
+                dllm_requests = dllm_req_dict
+
         return SamplingMetadata(
             temperature=temperature,
             all_greedy=self.all_greedy,
@@ -829,6 +842,7 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+            dllm_requests=dllm_requests,
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:

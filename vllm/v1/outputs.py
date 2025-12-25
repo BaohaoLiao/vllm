@@ -111,6 +111,12 @@ class SamplerOutput:
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
+    # DLLM: Mask state for each token in the block
+    # [num_reqs, block_size] or None if not DLLM
+    dllm_masks: torch.Tensor | None = None
+    # DLLM: Decoding order (iteration when token was unmasked)
+    # [num_reqs, block_size] or None if not DLLM
+    dllm_decoding_order: torch.Tensor | None = None
 
 
 @dataclass
@@ -173,6 +179,15 @@ class ModelRunnerOutput:
 
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None]
+
+    # DLLM: Mask state for each generated token
+    # num_reqs x num_generated_tokens or None if not DLLM
+    dllm_masks: list[list[int]] | None = None
+
+    # DLLM: Decoding order for each token (iteration when unmasked)
+    # num_reqs x num_generated_tokens or None if not DLLM
+    # Value indicates which iteration the token was finalized (0-indexed)
+    dllm_decoding_order: list[list[int]] | None = None
 
     kv_connector_output: KVConnectorOutput | None = None
 

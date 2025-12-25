@@ -155,6 +155,7 @@ from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.dllm_generator import DLLMGenerator
 
 from .utils import (
     AttentionGroup,
@@ -343,6 +344,10 @@ class GPUModelRunner(
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
+
+        # DLLM Generator for block-based generation
+        from vllm.v1.worker.dllm_generator import DLLMGenerator
+        self.dllm_generator = DLLMGenerator()
 
         self.eplb_state: EplbState | None = None
         """
@@ -598,6 +603,9 @@ class GPUModelRunner(
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
+
+        # DLLM
+        self.dllm_generator = DLLMGenerator()
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -3124,6 +3132,14 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            # Extract DLLM decoding order if present
+            dllm_decoding_order_lists = None
+            if sampler_output.dllm_decoding_order is not None:
+                # Convert tensor to list of lists
+                dllm_decoding_order_lists = [
+                    row.tolist() for row in sampler_output.dllm_decoding_order
+                ]
+
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -3136,6 +3152,7 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                dllm_decoding_order=dllm_decoding_order_lists,
             )
 
         if not self.use_async_scheduling:
